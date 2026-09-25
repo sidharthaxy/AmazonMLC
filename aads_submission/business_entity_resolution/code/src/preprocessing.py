@@ -2,6 +2,22 @@ import pandas as pd
 import re
 import string
 
+ABBR_MAP = {
+    'pvt': 'private',
+    'ltd': 'limited',
+    'corp': 'corporation',
+    'inc': 'incorporated',
+    'rd': 'road',
+    'st': 'street',
+    'ave': 'avenue',
+    'llc': 'limited liability company',
+    'co': 'company'
+}
+ABBR_PATTERN = re.compile(r'\b(' + '|'.join(ABBR_MAP.keys()) + r')\b')
+NUM_PATTERN = re.compile(r'\d+')
+WHITESPACE_PATTERN = re.compile(r'\s+')
+PUNCT_TRANS = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
+
 def load_data(filepath: str) -> pd.DataFrame:
     """
     Loads TSV data explicitly with string dtypes.
@@ -10,44 +26,22 @@ def load_data(filepath: str) -> pd.DataFrame:
 
 def clean_text(text: str) -> str:
     """
-    Normalizes uppercase/lowercase, removes extraneous punctuation, and cleans whitespace.
+    Normalizes uppercase/lowercase, removes punctuation, and cleans whitespace.
     """
-    if not isinstance(text, str):
+    if not isinstance(text, str) or not text:
         return ""
     text = text.lower()
-    # Replace punctuation with space to separate words properly
-    text = text.translate(str.maketrans(string.punctuation, ' ' * len(string.punctuation)))
-    # Clean up whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = text.translate(PUNCT_TRANS)
+    text = WHITESPACE_PATTERN.sub(' ', text).strip()
     return text
 
 def normalize_abbreviations(text: str) -> str:
     """
-    Expands legal/business and address abbreviations.
+    Expands legal/business and address abbreviations using compiled regex.
     """
     if not text:
         return ""
-    
-    # Pad with spaces to match whole words only
-    text = " " + text + " "
-    
-    replacements = {
-        r'\bpvt\b': 'private',
-        r'\bltd\b': 'limited',
-        r'\bcorp\b': 'corporation',
-        r'\binc\b': 'incorporated',
-        r'\b&\b': 'and',
-        r'\brd\b': 'road',
-        r'\bst\b': 'street',
-        r'\bave\b': 'avenue',
-        r'\bllc\b': 'limited liability company',
-        r'\bco\b': 'company'
-    }
-    
-    for pattern, repl in replacements.items():
-        text = re.sub(pattern, repl, text)
-        
-    return text.strip()
+    return ABBR_PATTERN.sub(lambda m: ABBR_MAP[m.group(0)], text)
 
 def extract_numerical_tokens(text: str) -> str:
     """
@@ -56,27 +50,26 @@ def extract_numerical_tokens(text: str) -> str:
     """
     if not text:
         return ""
-    # Find all consecutive digits
-    numbers = re.findall(r'\d+', text)
+    numbers = NUM_PATTERN.findall(text)
     return " ".join(numbers)
 
-def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def preprocess_dataframe(df: pd.DataFrame, inplace: bool = False) -> pd.DataFrame:
     """
-    Applies all preprocessing steps to the dataframe.
+    Applies text cleaning and normalization to dataframe columns.
     """
-    df = df.copy()
-    
+    if not inplace:
+        df = df.copy()
+        
     if 'business_name' in df.columns:
-        df['business_name_clean'] = df['business_name'].apply(clean_text)
-        df['business_name_norm'] = df['business_name_clean'].apply(normalize_abbreviations)
-        df['name_numbers'] = df['business_name_clean'].apply(extract_numerical_tokens)
+        df['business_name_clean'] = [clean_text(t) for t in df['business_name'].values]
+        df['business_name_norm'] = [normalize_abbreviations(t) for t in df['business_name_clean'].values]
         
     if 'business_address' in df.columns:
-        df['business_address_clean'] = df['business_address'].apply(clean_text)
-        df['business_address_norm'] = df['business_address_clean'].apply(normalize_abbreviations)
-        df['address_numbers'] = df['business_address_clean'].apply(extract_numerical_tokens)
+        df['business_address_clean'] = [clean_text(t) for t in df['business_address'].values]
+        df['business_address_norm'] = [normalize_abbreviations(t) for t in df['business_address_clean'].values]
+        df['address_numbers'] = [extract_numerical_tokens(t) for t in df['business_address_clean'].values]
         
     if 'country' in df.columns:
-        df['country_clean'] = df['country'].apply(clean_text)
+        df['country_clean'] = [clean_text(t) for t in df['country'].values]
         
     return df
