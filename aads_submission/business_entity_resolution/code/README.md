@@ -4,39 +4,46 @@ Amazon ML Challenge 2026
 ## Overview
 This repository contains the high-performance, memory-optimized Business Entity Resolution pipeline developed by team `aads` for the Amazon ML Challenge 2026.
 
-The pipeline is designed to resolve entities from a deduplicated reference source (Source 1) against large, noisy target pools (Source 2 and Source 3) totaling over 11 million records across dynamic open-set countries (US, India, France).
+The pipeline resolves entities from a deduplicated reference source (Source 1) against large, noisy target pools (Source 2 and Source 3) totaling over 11 million records across dynamic open-set countries (US, India, France).
+
+### Key Optimizations for F₀.₅
+- **Precision-tuned threshold** (default 0.80) — F₀.₅ weights precision 2× over recall
+- **Per-source capping** — at most top-5 S2 + top-6 S3 per S1 entity (data-driven from ground truth)
+- **17 engineered features** including legal suffix-stripped name similarity
+- **International legal suffix removal** — LLC, Inc, Ltd, SA, SAS, SARL, GmbH, etc.
+- **5:1 negative ratio** training with early stopping for precision emphasis
 
 ### 32 GB RAM Architecture Optimizations
-Engineered specifically to run reliably on an AWS SageMaker `ml.m5.2xlarge` instance (32 GB RAM) without triggering the Linux OOM killer:
-1. **$S1$ Batch Chunking**: Slices Source 1 into batches (default: `batch_size = 50,000`). Blocking, feature extraction, scoring, and output writing are executed per batch, followed by immediate `gc.collect()`.
-2. **Compact Inverted Index (`np.uint32`)**: Candidate blocking maps for the target pool store 32-bit unsigned integer arrays (`np.uint32`), reducing index memory by $> 85\%$.
-3. **High-Frequency Pruning**: Keys indexing $> 10,000$ target records are dropped to eliminate quadratic $O(N \times M)$ blowups.
-4. **Candidate Capping**: Candidates are prioritized by blocking key overlap count and capped at 30 candidates per $S1$ query record.
-5. **Streaming Output Writing**: Predictions are flushed incrementally to `output/matching_results.tsv` and `output/candidate_pairs.tsv` to avoid accumulating all mappings in RAM.
+1. **S1 Batch Chunking**: Slices Source 1 into batches (default: `batch_size = 50,000`). Blocking, feature extraction, scoring, and output writing are executed per batch, followed by immediate `gc.collect()`.
+2. **Compact Inverted Index (`np.uint32`)**: Candidate blocking maps store 32-bit unsigned integer arrays, reducing index memory by >85%.
+3. **High-Frequency Pruning**: Keys indexing >10,000 target records are dropped to eliminate quadratic blowups.
+4. **Candidate Capping**: Candidates capped at 30 per S1 query record by blocking key overlap count.
+5. **Streaming Output Writing**: Predictions flushed incrementally to disk.
 
 ---
 
 ## Project Structure
 ```
 code/
-├── README.md                          # Documentation and execution instructions
-├── requirements.txt                   # Python dependencies
+├── README.md
+├── requirements.txt
 └── src/
     ├── __init__.py
     ├── candidate_generation.py        # CompactInvertedIndex (np.uint32), pruning, candidate capping
-    ├── blocking.py                    # Backward-compatibility alias for candidate_generation.py
-    ├── features.py                    # RapidFuzz string metrics, token Jaccard, address n-grams
-    ├── model.py                       # EntityMatchingModel (XGBoost classifier & heuristic fallback)
-    ├── preprocessing.py               # Fast regex text cleaning and abbreviation normalization
-    ├── evaluate.py                    # Macro F_0.5 metric evaluation & threshold tuning
-    └── pipeline.py                    # Orchestrates country partitioning, batching & streaming
+    ├── blocking.py                    # Backward-compatibility alias
+    ├── features.py                    # 17 features: RapidFuzz, suffix-stripped JW/TSR, structural
+    ├── model.py                       # XGBoost (500 trees) + high-precision heuristic fallback
+    ├── preprocessing.py               # Text cleaning, legal suffix stripping, abbreviation normalization
+    ├── evaluate.py                    # Macro F_0.5 with per-source capping and threshold tuning
+    └── pipeline.py                    # Country partitioning, batching, validation, and streaming
+
+optimize_submission.py                 # Standalone post-processing script (at repo root)
 ```
 
 ---
 
 ## Installation & Setup
 
-1. Clone the repository and install required packages:
 ```bash
 pip install -r aads_submission/business_entity_resolution/code/requirements.txt
 ```
@@ -45,68 +52,97 @@ pip install -r aads_submission/business_entity_resolution/code/requirements.txt
 
 ## Running the Pipeline
 
-### 1. Test Inference (Default Submission Run)
-To run end-to-end entity resolution on test data and stream predictions to disk:
+### 1. Train Model + Tune Threshold (Recommended First Step)
 ```bash
-export PYTHONPATH=.
-python3 aads_submission/business_entity_resolution/code/src/pipeline.py \
+export PYTHONPATH=aads_submission/business_entity_resolution/code
+python3 -m src.pipeline \
     --data_dir student_resource/dataset \
-    --matching_out output/matching_results.tsv \
-    --candidate_out output/candidate_pairs.tsv
+    --is_train --validate \
+    --model_path models/entity_model_v2.json \
+    --matching_out output/matching_results_train.tsv \
+    --candidate_out output/candidate_pairs_train.tsv \
+    --threshold 0.80 --max_s2 5 --max_s3 6
 ```
 
-### 2. Fast Verification Run (Subset)
-To test the full pipeline end-to-end on a subset (e.g., 2,000 rows):
+### 2. Test Inference (Full Submission Run)
 ```bash
-export PYTHONPATH=.
-python3 aads_submission/business_entity_resolution/code/src/pipeline.py \
+export PYTHONPATH=aads_submission/business_entity_resolution/code
+python3 -m src.pipeline \
     --data_dir student_resource/dataset \
-    --subset 2000 \
+    --model_path models/entity_model_v2.json \
     --matching_out output/matching_results.tsv \
-    --candidate_out output/candidate_pairs.tsv
+    --candidate_out output/candidate_pairs.tsv \
+    --threshold <OPTIMAL_FROM_TRAINING> --max_s2 5 --max_s3 6
 ```
 
-### 3. Model Training
-To train or retrain the XGBoost classifier on training ground truth:
+### 3. Fast Subset Run (Local Testing)
 ```bash
-export PYTHONPATH=.
-python3 aads_submission/business_entity_resolution/code/src/pipeline.py \
+export PYTHONPATH=aads_submission/business_entity_resolution/code
+python3 -m src.pipeline \
     --data_dir student_resource/dataset \
-    --is_train \
-    --model_path models/entity_model.json
+    --is_train --subset 2000 \
+    --matching_out output/matching_results.tsv \
+    --candidate_out output/candidate_pairs.tsv \
+    --threshold 0.80
+```
+
+### 4. Quick Post-Processing (Rescore Existing Candidates)
+```bash
+python3 optimize_submission.py \
+    --data_dir student_resource/dataset \
+    --candidates output/candidate_pairs.tsv \
+    --output output/matching_results.tsv \
+    --threshold 0.80 --max_s2 5 --max_s3 6
 ```
 
 ---
 
 ## Command-Line Arguments
 
+### pipeline.py
 | Argument | Default | Description |
 |---|---|---|
-| `--data_dir` | *(required)* | Path to directory containing `train/` and `test/` datasets |
-| `--is_train` | `False` | Run in model training mode with ground truth pairs |
-| `--matching_out` | `output/matching_results.tsv` | Destination path for final prediction results |
-| `--candidate_out` | `output/candidate_pairs.tsv` | Destination path for generated candidate pairs |
-| `--model_path` | `models/entity_model.json` | Path to load/save the trained XGBoost model |
-| `--batch_size` | `50000` | Number of $S1$ records processed per batch |
-| `--top_k` | `30` | Maximum candidate matches retained per $S1$ record |
-| `--threshold` | `0.55` | Decision probability threshold for match acceptance |
-| `--subset` | `0` | Number of $S1$ records to process (`0` for all records) |
+| `--data_dir` | *(required)* | Path to dataset directory (containing `train/` and `test/`) |
+| `--is_train` | `False` | Run in training mode with ground truth pairs |
+| `--validate` | `False` | Run validation threshold tuning (requires `--is_train`) |
+| `--matching_out` | `output/matching_results.tsv` | Final prediction results output path |
+| `--candidate_out` | `output/candidate_pairs.tsv` | Candidate pairs output path |
+| `--model_path` | `models/entity_model.json` | Load/save XGBoost model path |
+| `--batch_size` | `50000` | S1 records per batch |
+| `--top_k` | `30` | Max candidates per S1 record |
+| `--threshold` | `0.80` | Decision threshold for match acceptance |
+| `--max_s2` | `5` | Max S2 matches per S1 entity |
+| `--max_s3` | `6` | Max S3 matches per S1 entity |
+| `--subset` | `0` | Process only first N S1 records (0 = all) |
+
+### optimize_submission.py
+| Argument | Default | Description |
+|---|---|---|
+| `--data_dir` | *(required)* | Dataset directory |
+| `--candidates` | `output/candidate_pairs.tsv` | Input candidate pairs |
+| `--output` | `output/matching_results.tsv` | Output matching results |
+| `--threshold` | `0.80` | Decision threshold |
+| `--max_s2` | `5` | Max S2 per S1 |
+| `--max_s3` | `6` | Max S3 per S1 |
+| `--validate` | `False` | Evaluate against ground truth |
+| `--train` | `False` | Train a new model |
+| `--is_train` | `False` | Use training data |
+| `--subset` | `0` | Subset size |
 
 ---
 
 ## Output Schema
 
-The final `output/matching_results.tsv` strictly conforms to the competition format:
+The final `output/matching_results.tsv` conforms to the competition format:
 - Tab-separated values (`.tsv`)
 - Header: `source1_entity_id\tmatched_entity_ids`
 - One row for every entity in Source 1
-- Matched IDs from Source 2 and Source 3 separated by commas without spaces
-- Singletons (no matches found) represented by an empty string
+- Matched IDs from Source 2 and Source 3 separated by commas
+- Singletons have an empty `matched_entity_ids`
 
-Example:
 ```tsv
 source1_entity_id	matched_entity_ids
 S1-156285671	S2-611995673,S2-522132855
 S1-717749279	
-S1-913506265	S3-867068018
+S1-913506265	S3-867068018,S2-813184149
 ```
